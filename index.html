@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tutup Watermark Video</title>
+<style>
+:root{--bg:#eef2f6;--panel:#fff;--ink:#14202b;--mut:#5d6b78;--ac:#1d6fa5;--acink:#fff;--line:#d3dce5;--stage:#0d141b}
+@media (prefers-color-scheme:dark){:root{--bg:#0f161d;--panel:#17212b;--ink:#e8eff5;--mut:#8fa1b1;--ac:#6cc4f0;--acink:#05202f;--line:#27364a;--stage:#070b10}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:16px;display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start}
+@media(max-width:780px){main{grid-template-columns:1fr}}
+h1{font-size:20px;margin:0 0 4px;grid-column:1/-1}
+.sub{color:var(--mut);margin:0 0 4px;grid-column:1/-1}
+.stage{background:var(--stage);border-radius:10px;padding:10px;display:flex;flex-direction:column;align-items:center;gap:10px}
+.wrap{width:100%;margin:0 auto}
+canvas{display:block;width:100%;height:auto;touch-action:none;cursor:crosshair;background:#000;border-radius:4px}
+.bar{display:flex;gap:10px;align-items:center;width:100%;color:#c9d6e0}
+.bar input[type=range]{flex:1}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;display:grid;gap:12px}
+label{display:grid;gap:4px;color:var(--mut);font-size:13px}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+button,select{font:inherit;color:var(--ink);background:transparent;border:1px solid var(--line);border-radius:8px;padding:7px 12px;cursor:pointer}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+button.on{border-color:var(--ac);color:var(--ac)}
+button.main{background:var(--ac);color:var(--acink);border-color:var(--ac);font-weight:600}
+button:disabled{opacity:.5;cursor:default}
+.chk{display:flex;gap:8px;align-items:center;color:var(--ink);font-size:14px}
+#status{color:var(--mut);font-size:13px;min-height:20px}
+#out{display:none;gap:8px}
+#out video{width:100%;max-height:300px;border-radius:6px;background:#000}
+a.dl{color:var(--ac);font-weight:600}
+</style>
+</head>
+<body>
+<main>
+<h1>Tutup watermark video</h1>
+<p class="sub">Putar, jeda di frame yang logonya terlihat, lalu sapu area logo dengan brush. Semua diproses di browser, video tidak diunggah.</p>
+
+<section class="stage">
+  <div class="wrap" id="wrap"><canvas id="view" width="360" height="640"></canvas></div>
+  <div class="bar">
+    <button id="play" disabled>Putar</button>
+    <input type="range" id="seek" min="0" max="1000" value="0" disabled aria-label="Posisi video">
+    <span id="time">0:00</span>
+  </div>
+</section>
+
+<aside class="panel">
+  <label>Video
+    <input type="file" id="file" accept="video/*">
+  </label>
+  <div class="row">
+    <button id="tBrush" class="on">Brush</button>
+    <button id="tErase">Penghapus</button>
+    <button id="undo">Urungkan</button>
+    <button id="clear">Kosongkan</button>
+  </div>
+  <label>Ukuran brush
+    <input type="range" id="size" min="10" max="240" value="70">
+  </label>
+  <label>Kekuatan blur
+    <input type="range" id="blur" min="4" max="60" value="28">
+  </label>
+  <label>Gaya
+    <select id="style"><option value="frost">Kaca es</option><option value="blur">Blur polos</option></select>
+  </label>
+  <label class="chk"><input type="checkbox" id="fx" checked> Pratinjau efek</label>
+  <label class="chk"><input type="checkbox" id="showMask" checked> Tampilkan area brush (merah)</label>
+  <div class="row">
+    <button id="save">Simpan area ini</button>
+  </div>
+  <button id="render" class="main" disabled>Render video</button>
+  <div id="status">Pilih video untuk mulai.</div>
+  <div id="out">
+    <video id="result" controls playsinline></video>
+    <a class="dl" id="dl">Unduh hasil</a>
+  </div>
+</aside>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const view = $('view'), vctx = view.getContext('2d');
+const video = document.createElement('video'); video.playsInline = true;
+const mk = () => { const c = document.createElement('canvas'); return [c, c.getContext('2d', { willReadFrequently: true })]; };
+const [mask, mctx] = mk(), [tint, tctx] = mk(), [small, sctx] = mk(), [small2, s2ctx] = mk(), [tmp, xctx] = mk();
+const P = 40, DOWN = 6; // margin tepi & faktor pengecilan untuk blur cepat
+let W = 0, H = 0, tool = 'brush', drawing = false, last = null, dirty = true, recording = false, undoStack = [];
+
+function fmt(t){ t = Math.max(0, t|0); return Math.floor(t/60) + ':' + String(t%60).padStart(2,'0'); }
+function say(t){ $('status').textContent = t; }
+
+$('file').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  video.src = URL.createObjectURL(f);
+  say('Memuat video…');
+};
+
+video.onloadedmetadata = () => {
+  W = video.videoWidth; H = video.videoHeight;
+  for (const c of [view, mask, tint, tmp]) { c.width = W; c.height = H; }
+  small.width = small2.width = Math.round(W / DOWN) + 2 * P;
+  small.height = small2.height = Math.round(H / DOWN) + 2 * P;
+  $('wrap').style.maxWidth = Math.round(innerHeight * 0.78 * W / H) + 'px';
+  undoStack = []; dirty = true;
+  const saved = localStorage.getItem('mask_' + W + 'x' + H);
+  if (saved) { const im = new Image(); im.onload = () => { mctx.drawImage(im, 0, 0); dirty = true; say('Area tersimpan untuk ukuran ' + W + '×' + H + ' dimuat.'); }; im.src = saved; }
+  else say('Video ' + W + '×' + H + ' siap. Jeda di frame yang jelas, lalu brush area logo.');
+  video.currentTime = 0.05;
+  for (const id of ['play','seek','render']) $(id).disabled = false;
+};
+
+video.ontimeupdate = () => {
+  if (!video.duration) return;
+  $('seek').value = Math.round(video.currentTime / video.duration * 1000);
+  $('time').textContent = fmt(video.currentTime) + ' / ' + fmt(video.duration);
+  if (recording) say('Merender… ' + Math.round(video.currentTime / video.duration * 100) + '% (biarkan tab ini tetap terbuka)');
+};
+video.onplay = () => $('play').textContent = 'Jeda';
+video.onpause = () => $('play').textContent = 'Putar';
+$('play').onclick = () => video.paused ? video.play() : video.pause();
+$('seek').oninput = e => { video.currentTime = e.target.value / 1000 * video.duration; };
+
+/* ---------- efek blur / kaca es di area mask ---------- */
+function applyFx() {
+  const vw = W, vh = H, sw = small.width - 2*P, sh = small.height - 2*P;
+  // salin tepi video ke margin supaya blur di pinggir layar tetap penuh
+  sctx.drawImage(video, P, P, sw, sh);
+  sctx.drawImage(video, 0, 0, 1, vh, 0, P, P, sh);
+  sctx.drawImage(video, vw-1, 0, 1, vh, P+sw, P, P, sh);
+  sctx.drawImage(video, 0, 0, vw, 1, P, 0, sw, P);
+  sctx.drawImage(video, 0, vh-1, vw, 1, P, P+sh, sw, P);
+  s2ctx.filter = 'blur(' + (+$('blur').value / DOWN) + 'px)';
+  s2ctx.clearRect(0, 0, small2.width, small2.height);
+  s2ctx.drawImage(small, 0, 0);
+  s2ctx.filter = 'none';
+  xctx.globalCompositeOperation = 'copy';
+  xctx.imageSmoothingQuality = 'high';
+  xctx.drawImage(small2, P, P, sw, sh, 0, 0, W, H);
+  if ($('style').value === 'frost') {
+    xctx.globalCompositeOperation = 'source-over';
+    xctx.fillStyle = 'rgba(255,255,255,.14)';
+    xctx.fillRect(0, 0, W, H);
+  }
+  xctx.globalCompositeOperation = 'destination-in';
+  xctx.drawImage(mask, 0, 0);
+  xctx.globalCompositeOperation = 'source-over';
+  vctx.drawImage(tmp, 0, 0);
+}
+
+function drawTint() {
+  if (dirty) {
+    tctx.globalCompositeOperation = 'copy'; tctx.drawImage(mask, 0, 0);
+    tctx.globalCompositeOperation = 'source-in'; tctx.fillStyle = 'rgba(255,40,70,.55)'; tctx.fillRect(0, 0, W, H);
+    tctx.globalCompositeOperation = 'source-over'; dirty = false;
+  }
+  vctx.drawImage(tint, 0, 0);
+}
+
+function frame() {
+  if (W) {
+    vctx.drawImage(video, 0, 0, W, H);
+    if ($('fx').checked || recording) applyFx();
+    if (!recording && $('showMask').checked) drawTint();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------- brush ---------- */
+const pos = e => { const r = view.getBoundingClientRect(); return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height }; };
+function stroke(a, b) {
+  const s = +$('size').value;
+  mctx.globalCompositeOperation = tool === 'brush' ? 'source-over' : 'destination-out';
+  mctx.strokeStyle = '#fff'; mctx.shadowColor = '#fff'; mctx.shadowBlur = s * 0.3;
+  mctx.lineWidth = s; mctx.lineCap = 'round'; mctx.lineJoin = 'round';
+  mctx.beginPath(); mctx.moveTo(a.x, a.y); mctx.lineTo(b.x + 0.01, b.y); mctx.stroke();
+  mctx.shadowBlur = 0; dirty = true;
+}
+function pushUndo() { undoStack.push(mctx.getImageData(0, 0, W, H)); if (undoStack.length > 8) undoStack.shift(); }
+view.addEventListener('pointerdown', e => {
+  if (!W || recording) return;
+  view.setPointerCapture(e.pointerId); pushUndo(); drawing = true; last = pos(e); stroke(last, last);
+});
+view.addEventListener('pointermove', e => { if (drawing) { const p = pos(e); stroke(last, p); last = p; } });
+for (const ev of ['pointerup', 'pointercancel']) view.addEventListener(ev, () => drawing = false);
+
+$('tBrush').onclick = () => { tool = 'brush'; $('tBrush').classList.add('on'); $('tErase').classList.remove('on'); };
+$('tErase').onclick = () => { tool = 'erase'; $('tErase').classList.add('on'); $('tBrush').classList.remove('on'); };
+$('undo').onclick = () => { const d = undoStack.pop(); if (d) { mctx.putImageData(d, 0, 0); dirty = true; } };
+$('clear').onclick = () => { if (!W) return; pushUndo(); mctx.clearRect(0, 0, W, H); dirty = true; };
+$('save').onclick = () => { if (!W) return; localStorage.setItem('mask_' + W + 'x' + H, mask.toDataURL()); say('Area disimpan. Akan dimuat otomatis untuk video ' + W + '×' + H + '.'); };
+
+/* ---------- render (rekam kanvas secara real-time) ---------- */
+const once = (el, ev) => new Promise(r => el.addEventListener(ev, r, { once: true }));
+$('render').onclick = async () => {
+  if (!W || recording) return;
+  const types = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'];
+  const mime = window.MediaRecorder && types.find(t => MediaRecorder.isTypeSupported(t));
+  if (!mime) { say('Browser ini belum mendukung perekaman video. Gunakan Chrome atau Edge.'); return; }
+  recording = true; $('render').disabled = true; $('out').style.display = 'none';
+  video.pause();
+  if (video.currentTime > 0) { video.currentTime = 0; await once(video, 'seeked'); }
+  const stream = view.captureStream(30);
+  try { video.captureStream().getAudioTracks().forEach(t => stream.addTrack(t)); } catch (_) {}
+  const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12e6 });
+  const chunks = [];
+  rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+  rec.onstop = () => {
+    const ext = mime.includes('mp4') ? 'mp4' : 'webm';
+    const url = URL.createObjectURL(new Blob(chunks, { type: mime.split(';')[0] }));
+    $('result').src = url; $('dl').href = url; $('dl').download = 'video-bersih.' + ext;
+    $('out').style.display = 'grid';
+    recording = false; $('render').disabled = false; dirty = true;
+    say('Selesai. Periksa hasilnya, lalu unduh.');
+  };
+  video.onended = () => { video.onended = null; rec.stop(); };
+  rec.start(); await video.play();
+};
+</script>
+</body>
+</html>
